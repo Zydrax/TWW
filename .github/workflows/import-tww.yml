@@ -1,0 +1,83 @@
+name: Import TWW source
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: tww-source-import
+  cancel-in-progress: false
+
+jobs:
+  import-source:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout TWW
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          lfs: true
+
+      - name: Download Draconic-WoW source from Google Drive
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check --quiet gdown
+          gdown --id "1ezrSJkDQQecwQnCk_Ztj-xu63yb9al8N" -O "$RUNNER_TEMP/Draconic-WoW-master.zip"
+          test -s "$RUNNER_TEMP/Draconic-WoW-master.zip"
+          unzip -tq "$RUNNER_TEMP/Draconic-WoW-master.zip" >/dev/null
+          ls -lh "$RUNNER_TEMP/Draconic-WoW-master.zip"
+
+      - name: Extract source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/tww-extracted"
+          unzip -q "$RUNNER_TEMP/Draconic-WoW-master.zip" -d "$RUNNER_TEMP/tww-extracted"
+
+          mapfile -t entries < <(find "$RUNNER_TEMP/tww-extracted" -mindepth 1 -maxdepth 1 -printf '%p\n')
+          SOURCE_ROOT="$RUNNER_TEMP/tww-extracted"
+          if [ "${#entries[@]}" -eq 1 ] && [ -d "${entries[0]}" ]; then
+            SOURCE_ROOT="${entries[0]}"
+          fi
+
+          rsync -a \
+            --exclude '.git/' \
+            --exclude '.github/workflows/import-tww.yml' \
+            "$SOURCE_ROOT/" "$GITHUB_WORKSPACE/"
+
+          find "$GITHUB_WORKSPACE" -mindepth 2 -type d -name .git -prune -exec rm -rf '{}' + || true
+
+      - name: Configure Git LFS for oversized files
+        shell: bash
+        run: |
+          set -euo pipefail
+          git lfs install --local
+          while IFS= read -r -d '' file; do
+            path="${file#./}"
+            echo "Tracking large file with Git LFS: $path"
+            git lfs track "$path"
+          done < <(find . -type f -not -path './.git/*' -size +95M -print0)
+
+      - name: Commit and push imported source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+
+          if git diff --cached --quiet; then
+            echo "No source changes to commit."
+            exit 0
+          fi
+
+          git commit -m "Import Draconic-WoW source into TWW [skip import]"
+          git push origin HEAD:main
